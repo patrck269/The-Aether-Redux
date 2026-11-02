@@ -47,11 +47,6 @@ public class BlightwillowRootsPlacer extends RootPlacer {
     }
 
     private static final Direction[] HORIZONTAL_PLANE = Direction.Plane.HORIZONTAL.stream().toArray(Direction[]::new);
-    private static final Direction[] HORIZONTAL_PLANE_SHUFFLE = HORIZONTAL_PLANE.clone();
-
-
-    // Reuse this instance as to avoid unneeded object creation -- boolean determines if it should use the wood block instead of the log
-    private final Map<BlockPos, Boolean> placements = new HashMap<>();
 
     @Override
     public boolean placeRoots(LevelSimulatedReader level, BiConsumer<BlockPos, BlockState> setter, RandomSource random, BlockPos origin, BlockPos trunkOrigin, TreeConfiguration treeConfig) {
@@ -60,14 +55,16 @@ public class BlightwillowRootsPlacer extends RootPlacer {
             return false;
         }
 
-        this.placements.clear();
+        // Local to this call. The placer instance is shared, and chunk workers run it at the same time.
+        Map<BlockPos, Boolean> placements = new HashMap<>();
+        Direction[] shuffledHorizontalPlane = HORIZONTAL_PLANE.clone();
 
         // Method to ensure there will be one of all 4 possible root heights for the tree
-        ArrayUtil.shuffle(HORIZONTAL_PLANE_SHUFFLE, random);
+        ArrayUtil.shuffle(shuffledHorizontalPlane, random);
 
         int height = trunkOrigin.getY() - origin.getY();
 
-        for(int i = 0; i < height; i++) this.placements.put(origin.above(i), false);
+        for(int i = 0; i < height; i++) placements.put(origin.above(i), false);
 
         // from 2 to 3 --
         int baseRootHeight = Math.max(height - 5, 2);
@@ -75,7 +72,7 @@ public class BlightwillowRootsPlacer extends RootPlacer {
         for (Direction d : Direction.Plane.HORIZONTAL) {
 
             // Place side roots
-            int rootSize = baseRootHeight + ArrayUtils.indexOf(HORIZONTAL_PLANE_SHUFFLE, d);
+            int rootSize = baseRootHeight + ArrayUtils.indexOf(shuffledHorizontalPlane, d);
 
             BlockPos rootStart = origin.relative(d, 1);
 
@@ -85,7 +82,6 @@ public class BlightwillowRootsPlacer extends RootPlacer {
                 BlockPos test = rootStart.above(i);
                 if (this.validRootPos(level, test))
                     if (i < -maxRootDepth) {
-                        unshuffle();
                         return false;
                     } else continue;
                 min = i + 1;
@@ -95,17 +91,15 @@ public class BlightwillowRootsPlacer extends RootPlacer {
             for (int i = min; i < rootSize; i++) {
                 BlockPos pos = rootStart.above(i);
                 if (i < rootSize - 1 && validRootPos(level, pos.above())) {
-                    this.placements.put(pos, false);
+                    placements.put(pos, false);
                 } else if (validRootPos(level, pos)) {
-                    this.placements.put(pos, true);
+                    placements.put(pos, true);
                 }
             }
         }
 
-        unshuffle();
-
-        if (validateAll(level, this.placements)) {
-            this.placements.forEach((pos, useWood) -> setter.accept(pos, !useWood ? treeConfig.trunkProvider.getState(random, pos) : this.wood.getState(random, pos)));
+        if (validateAll(level, placements)) {
+            placements.forEach((pos, useWood) -> setter.accept(pos, !useWood ? treeConfig.trunkProvider.getState(random, pos) : this.wood.getState(random, pos)));
             TrunkPlacer.setDirtAt(level, setter, random, origin.below(), treeConfig);
 
             return true;
@@ -118,13 +112,16 @@ public class BlightwillowRootsPlacer extends RootPlacer {
         return true;
     }
 
-    private void unshuffle() {
-        // Reset shuffling array to ensure consistency
-        System.arraycopy(HORIZONTAL_PLANE, 0, HORIZONTAL_PLANE_SHUFFLE, 0, HORIZONTAL_PLANE.length);
-    }
-
     protected boolean validRootPos(LevelSimulatedReader level, BlockPos pos) {
-        return level.isStateAtPosition(pos, state -> state.isAir() || state.is(BlockTags.REPLACEABLE) || state.is(BlockTags.REPLACEABLE_BY_TREES));
+        try {
+            return level.isStateAtPosition(pos, state -> state.isAir() || state.is(BlockTags.REPLACEABLE) || state.is(BlockTags.REPLACEABLE_BY_TREES));
+        } catch (RuntimeException ex) {
+            String message = ex.getMessage();
+            if (message != null && message.contains("out of bound")) {
+                return false;
+            }
+            throw ex;
+        }
     }
 
     public static boolean isDirt(BlockState state) {
